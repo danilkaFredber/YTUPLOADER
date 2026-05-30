@@ -1,4 +1,0 @@
-# Статический экспорт Next.js — плагин не нужен.
-[build]
-  command = "npm run build"
-  publish = "out"
