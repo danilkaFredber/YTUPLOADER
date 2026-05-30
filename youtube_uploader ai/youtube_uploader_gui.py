@@ -187,17 +187,59 @@ class BrowserEngine:
             pass
 
     @staticmethod
-    def login_interactive(profile, wait_event, log):
+    def _is_logged_in(page):
+        """Грубая проверка, что вход в Google/YouTube завершён."""
+        url = page.url or ""
+        if "accounts.google.com" in url or "/signin" in url.lower():
+            return False
+        if not any(d in url for d in ["youtube.com", "google.com"]):
+            return False
+        selectors = ["#avatar-btn", "button#avatar-btn",
+                     "ytd-topbar-menu-button-renderer #avatar-btn",
+                     "a[href*=\"SignOutOptions\"]",
+                     "a[aria-label*=\"Google\"][href*=\"SignOutOptions\"]",
+                     "img.gb_P", "img.gbii"]
+        for sel in selectors:
+            try:
+                if page.locator(sel).first.is_visible(timeout=600):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def login_interactive(profile, wait_event, log, on_success=None):
+        login_url = ("https://accounts.google.com/ServiceLogin"
+                     "?service=youtube&continue=" + YOUTUBE_URL)
         with sync_playwright() as p:
             ctx = BrowserEngine._launch(p, profile, "visible")
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
-                page.goto(YOUTUBE_URL, wait_until="domcontentloaded", timeout=60000)
+                page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
             except Exception:
-                pass
-            log("Окно браузера открыто. Войдите в аккаунт любым способом...")
+                try:
+                    page.goto(YOUTUBE_URL, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+            log("Открыта страница входа Google. Введите логин и пароль в окне браузера...")
+            detected = False
             while not wait_event.is_set():
-                page.wait_for_timeout(500)
+                try:
+                    if not detected and BrowserEngine._is_logged_in(page):
+                        detected = True
+                        log("Вход обнаружен — сохраняю сессию...")
+                        if on_success:
+                            try:
+                                on_success()
+                            except Exception:
+                                pass
+                        break
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_timeout(800)
+                except Exception:
+                    break
             try:
                 ctx.close()
             except Exception:
@@ -1004,7 +1046,7 @@ class UploaderGUI(tk.Tk):
     def _build_accounts(self, root):
         wrap = tk.Frame(root, bg=BG)
         wrap.pack(fill="both", expand=True, padx=26, pady=18)
-        self._section_header(wrap, "Аккаунты YouTube", "Вход обычным способом в окне браузера — без API и токенов.")
+        self._section_header(wrap, "Аккаунты YouTube", "Приложение само открывает страницу входа Google — введите логин и пароль, сессия сохранится автоматически.")
         b = self._card(wrap, "Мои аккаунты", fill="both", expand=True)
         row = tk.Frame(b, bg=CARD)
         row.pack(fill="both", expand=True)
@@ -1138,25 +1180,36 @@ class UploaderGUI(tk.Tk):
             return
         profile = profile_path(label)
         self._login_event = threading.Event()
-        self.log("Открываю браузер для входа в '" + label + "'...")
+        self.log("Открываю страницу входа Google для '" + label + "'...")
         dlg = tk.Toplevel(self)
         dlg.title("Вход в аккаунт")
-        dlg.geometry("420x180")
+        dlg.geometry("460x210")
         dlg.configure(bg=CARD)
         dlg.transient(self)
-        tk.Label(dlg, text="Войдите в аккаунт '" + label + "'\nв открывшемся окне браузера.\nКогда войдёте — нажмите кнопку.", bg=CARD, fg=TEXT, justify="center", font=(FONT, 10)).pack(pady=18, padx=16)
+        tk.Label(dlg, text="Откроется окно браузера на странице входа Google.\nВведите логин и пароль аккаунта '" + label + "'.\nКак только вход завершится, аккаунт сохранится\nавтоматически (или нажмите кнопку ниже).", bg=CARD, fg=TEXT, justify="center", font=(FONT, 10)).pack(pady=18, padx=16)
+
+        finished = {"v": False}
 
         def done():
+            if finished["v"]:
+                return
+            finished["v"] = True
             if self._login_event:
                 self._login_event.set()
-            dlg.destroy()
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
             self.after(1200, self._refresh_accounts)
             self.log("Аккаунт '" + label + "' сохранён.")
         ttk.Button(dlg, text="Готово, я вошёл", style="Accent.TButton", command=done).pack(pady=6, padx=20, fill="x")
 
+        def on_detected():
+            self.after(0, done)
+
         def worker():
             try:
-                BrowserEngine.login_interactive(profile, self._login_event, self.log)
+                BrowserEngine.login_interactive(profile, self._login_event, self.log, on_detected)
             except Exception as e:
                 self.log("Ошибка входа: " + str(e))
         threading.Thread(target=worker, daemon=True).start()
